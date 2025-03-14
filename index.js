@@ -57,67 +57,91 @@ let enableSocks = false;
  * @returns {Promise<Response>} Response object
  */
 export default {
-    async fetch(request, env, ctx) {
-        try {
-            const url = new URL(request.url);
-            const pathParts = url.pathname.split('/').filter(Boolean);
+	/**
+	 * @param {import("@cloudflare/workers-types").Request} request
+	 * @param {{UUID: string, PROXYIP: string, SOCKS5: string, SOCKS5_RELAY: string}} env
+	 * @param {import("@cloudflare/workers-types").ExecutionContext} _ctx
+	 * @returns {Promise<Response>}
+	 */
+	async fetch(request, env, _ctx) {
+		try {
+			const { UUID, PROXYIP, SOCKS5, SOCKS5_RELAY } = env;
+			userID = UUID || userID;
+			socks5Address = SOCKS5 || socks5Address;
+			socks5Relay = SOCKS5_RELAY || socks5Relay;
 
-            let targetHost = null;
-            let newPath = null;
+			// Create URL and extract host
+			const url = new URL(request.url);
+			const host = request.headers.get('Host');
 
-            // Check if the second path segment is an IP or hostname
-            if (pathParts.length >= 2 && isValidHost(pathParts[1])) {
-                targetHost = pathParts[1];
-                newPath = `/${pathParts[0]}` + (url.search ? url.search : '');
-                url.pathname = newPath; // Update the pathname
-            }
+			// Extract proxy IP from the URL path (e.g. "/ws/159.223.224.134?ed=2048")
+			const extractedProxyIP = extractProxyIPFromPath(url);
+			let effectiveProxyIP = PROXYIP;
+			if (extractedProxyIP) {
+				effectiveProxyIP = extractedProxyIP;
+				console.log("Overriding proxy IP with", effectiveProxyIP);
+			}
 
-            if (!targetHost) {
-                return new Response("Invalid target host.", { status: 400 });
-            }
+			// Handle proxy configuration using the effective proxy IP
+			const proxyConfig = handleProxyConfig(effectiveProxyIP);
+			let proxyIP_final = proxyConfig.ip;
+			let proxyPort = proxyConfig.port;
 
-            if (request.headers.get('Upgrade') === 'websocket') {
-                return handleWebSocket(request, targetHost);
-            }
+			// Process the request path for user IDs and routing
+			const userIDs = userID.includes(',') ? userID.split(',').map(id => id.trim()) : [userID];
+			const requestedPath = url.pathname.substring(1); // Remove leading slash
+			const matchingUserID = userIDs.length === 1
+				? (requestedPath === userIDs[0] ||
+					requestedPath === `sub/${userIDs[0]}` ||
+					requestedPath === `bestip/${userIDs[0]}` ? userIDs[0] : null)
+				: userIDs.find(id => {
+					const patterns = [id, `sub/${id}`, `bestip/${id}`];
+					return patterns.some(pattern => requestedPath.startsWith(pattern));
+				});
 
-            return new Response("Only WebSocket connections are supported.", { status: 400 });
-        } catch (err) {
-            return new Response(err.toString(), { status: 500 });
-        }
-    }
+			// Handle non-WebSocket requests
+			if (request.headers.get('Upgrade') !== 'websocket') {
+				if (url.pathname === '/cf') {
+					return new Response(JSON.stringify(request.cf, null, 4), {
+						status: 200,
+						headers: { "Content-Type": "application/json;charset=utf-8" },
+					});
+				}
+
+				if (matchingUserID) {
+					if (url.pathname === `/${matchingUserID}` || url.pathname === `/sub/${matchingUserID}`) {
+						const isSubscription = url.pathname.startsWith('/sub/');
+						// Use the effectiveProxyIP here if available
+						const proxyAddresses = effectiveProxyIP
+							? effectiveProxyIP.split(',').map(addr => addr.trim())
+							: proxyIP_final;
+						const content = isSubscription
+							? GenSub(matchingUserID, host, proxyAddresses)
+							: getConfig(matchingUserID, host, proxyAddresses);
+
+						return new Response(content, {
+							status: 200,
+							headers: {
+								"Content-Type": isSubscription
+									? "text/plain;charset=utf-8"
+									: "text/html; charset=utf-8"
+							},
+						});
+					} else if (url.pathname === `/bestip/${matchingUserID}`) {
+						return fetch(`https://bestip.06151953.xyz/auto?host=${host}&uuid=${matchingUserID}&path=/`, { headers: request.headers });
+					}
+				}
+				return handleDefaultPath(url, request);
+			} else {
+				// For WebSocket upgrade requests
+				return await ProtocolOverWSHandler(request);
+			}
+		} catch (err) {
+			return new Response(err.toString());
+		}
+	},
 };
 
-function isValidHost(host) {
-    return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || /^[a-zA-Z0-9.-]+$/.test(host);
-}
-
-async function handleWebSocket(request, targetHost) {
-    const webSocketPair = new WebSocketPair();
-    const [client, server] = Object.values(webSocketPair);
-    server.accept();
-
-    try {
-        const remoteSocket = connect({ hostname: targetHost, port: 443 });
-        await pipeWebSocket(server, remoteSocket);
-    } catch (error) {
-        return new Response("WebSocket connection failed.", { status: 500 });
-    }
-
-    return new Response(null, { status: 101, webSocket: client });
-}
-
-async function pipeWebSocket(ws, socket) {
-    const reader = ws.readable.getReader();
-    const writer = socket.writable.getWriter();
-    reader.read().then(async function process({ done, value }) {
-        if (done) {
-            writer.close();
-            return;
-        }
-        await writer.write(value);
-        reader.read().then(process);
-    });
-};
 
 /**
  * Handles default path requests when no specific route matches.
