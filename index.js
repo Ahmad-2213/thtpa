@@ -64,77 +64,26 @@ export default {
       socks5Address = SOCKS5 || socks5Address;
       socks5Relay = SOCKS5_RELAY || socks5Relay;
 
-      // Environment-based proxy configuration (used if no forced proxy is provided)
-      const proxyConfig = handleProxyConfig(PROXYIP);
-      proxyIP = proxyConfig.ip;
-      proxyPort = proxyConfig.port;
-
-      if (socks5Address) {
-        try {
-          const selectedSocks5 = selectRandomAddress(socks5Address);
-          parsedSocks5Address = socks5AddressParser(selectedSocks5);
-          enableSocks = true;
-        } catch (err) {
-          console.log(err.toString());
-          enableSocks = false;
-        }
-      }
-
-      // Create configuration from settings. Make sure load_settings() does not override forced proxy.
+      // Load settings
       const cfg = load_settings(env, SETTINGS);
 
-      // Parse URL and extract forced proxy from the path, if present.
+      // Extract forced proxy from URL
       const url = new URL(request.url);
       if (extractProxyAndRevertPath(url, cfg)) {
         const log = new Logger(cfg.LOG_LEVEL, cfg.TIME_ZONE);
-        log.info('Forced proxy extracted:', cfg.PROXY);
+        log.info(`Forced proxy extracted: ${cfg.PROXY}`);
       }
 
-      // Routing for non-WebSocket requests.
+      // Debug Log to Confirm Proxy is Set
+      if (cfg.PROXY) {
+        console.log(`[DEBUG] Using forced proxy: ${cfg.PROXY}`);
+      } else {
+        console.log(`[DEBUG] No forced proxy, using direct connection`);
+      }
+
       if (request.headers.get('Upgrade') !== 'websocket') {
-        if (url.pathname === '/cf') {
-          return new Response(JSON.stringify(request.cf, null, 4), {
-            status: 200,
-            headers: { "Content-Type": "application/json;charset=utf-8" },
-          });
-        }
-
-        // Handle user-specific routes (subscriptions, bestip, etc.)
-        const host = request.headers.get('Host');
-        const requestedPath = url.pathname.substring(1); // Remove leading slash
-        const userIDs = userID.includes(',') ? userID.split(',').map(id => id.trim()) : [userID];
-        const matchingUserID =
-          userIDs.length === 1
-            ? (requestedPath === userIDs[0] ||
-               requestedPath === `sub/${userIDs[0]}` ||
-               requestedPath === `bestip/${userIDs[0]}` ? userIDs[0] : null)
-            : userIDs.find(id => {
-                const patterns = [id, `sub/${id}`, `bestip/${id}`];
-                return patterns.some(pattern => requestedPath.startsWith(pattern));
-              });
-
-        if (matchingUserID) {
-          if (url.pathname === `/${matchingUserID}` || url.pathname === `/sub/${matchingUserID}`) {
-            const isSubscription = url.pathname.startsWith('/sub/');
-            const proxyAddresses = PROXYIP ? PROXYIP.split(',').map(addr => addr.trim()) : proxyIP;
-            const content = isSubscription
-              ? GenSub(matchingUserID, host, proxyAddresses)
-              : getConfig(matchingUserID, host, proxyAddresses);
-            return new Response(content, {
-              status: 200,
-              headers: {
-                "Content-Type": isSubscription
-                  ? "text/plain;charset=utf-8"
-                  : "text/html; charset=utf-8"
-              },
-            });
-          } else if (url.pathname === `/bestip/${matchingUserID}`) {
-            return fetch(`https://bestip.06151953.xyz/auto?host=${host}&uuid=${matchingUserID}&path=/`, { headers: request.headers });
-          }
-        }
         return handleDefaultPath(url, request);
       } else {
-        // For WebSocket requests, pass the cfg object downstream.
         return await ProtocolOverWSHandler(request, cfg);
       }
     } catch (err) {
@@ -522,9 +471,10 @@ async function HandleTCPOutBound(remoteSocket, addressType, addressRemote, portR
   }
   
   async function retry() {
+    log(`Retrying connection directly to ${addressRemote}:${portRemote}`);
     let fallbackSocket = await connectAndWrite(addressRemote, portRemote);
     fallbackSocket.closed.catch(error => {
-      console.log('retry tcpSocket closed error', error);
+      log('Retry tcpSocket closed error', error);
     }).finally(() => {
       safeCloseWebSocket(webSocket);
     });
@@ -532,16 +482,18 @@ async function HandleTCPOutBound(remoteSocket, addressType, addressRemote, portR
   }
   
   let targetAddress, targetPort;
-  // If the destination is not an IP and forced proxy is set, route via forced proxy.
-  if (!isValidIP(addressRemote) && cfg && cfg.PROXY) {
+
+  // **Force Proxy Routing**
+  if (cfg && cfg.PROXY) {
     targetAddress = cfg.PROXY;
-    targetPort = (cfg.PROXY.indexOf(':') !== -1) ? cfg.PROXY.split(':')[1] : 443;
+    targetPort = proxyPort || 443;  // Default to 443 if port not set
     log(`Routing via forced proxy: ${targetAddress}:${targetPort}`);
   } else {
     targetAddress = addressRemote;
     targetPort = portRemote;
+    log(`No forced proxy, connecting directly to ${targetAddress}:${targetPort}`);
   }
-  
+
   let tcpSocket = await connectAndWrite(targetAddress, targetPort);
   RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log);
 }
