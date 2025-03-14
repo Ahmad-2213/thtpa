@@ -5,66 +5,7 @@ import { connect } from 'cloudflare:sockets';
 // ======================================
 // Configuration
 // ======================================
-/**
- * Checks if a string is a valid IPv4 address.
- * @param {string} ip
- * @returns {boolean}
- */
-let forcedProxy = null;
 
-function isValidIP(ip) {
-  return /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.|$)){4}$/.test(ip);
-}
-
-function extractProxyIPFromPath(url) {
-  const parts = url.pathname.split('/').filter(Boolean);
-  if (parts.length === 2 && isValidIP(parts[1])) {
-    // Remove the IP segment so that the remaining route (e.g. "/ws") is preserved.
-    url.pathname = '/' + parts[0];
-    return parts[1];
-  }
-  return null;
-}
-
-const IPV4_REGEX = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
-
-async function timed_connect(hostname, port, ms) {
-  return new Promise((resolve, reject) => {
-    const conn = connect({ hostname, port });
-    const timeoutId = setTimeout(() => reject(new Error("connect timeout")), ms);
-    conn.opened.then(() => {
-      clearTimeout(timeoutId);
-      resolve(conn);
-    }).catch(err => {
-      clearTimeout(timeoutId);
-      reject(err);
-    });
-  });
-}
-/**
- * Modified connect_remote function.
- * If forcedProxy is provided (and valid), the connection is forced through it.
- * Otherwise, the function falls back to EDtunnel’s default logic.
- * (The remainder of EDtunnel’s logic remains unchanged.)
- *
- * @param {object} log - Logging object/function.
- * @param {string} hostname - Target hostname.
- * @param {number} port - Target port.
- * @param {string} cfg_proxy - Here, this parameter is the forced proxy IP.
- * @returns {Promise<Socket>}
- */
-async function connect_remote(log, hostname, port, forced) {
-  const timeout = 1000; // connection timeout in ms
-  const portStr = port.toString();
-
-  if (forced && isValidIP(forced)) {
-    log.info(`FORCED: Connecting via forced proxy ${forced} for target ${hostname}:${portStr}`);
-    return timed_connect(forced, portStr, timeout);
-  }
-  // Otherwise, simply use direct connection.
-  log.info(`Direct connection to ${hostname}:${portStr}`);
-  return timed_connect(hostname, portStr, timeout);
-}
 /**
  * User configuration and settings
  * Generate UUID: [Windows] Press "Win + R", input cmd and run: Powershell -NoExit -Command "[guid]::NewGuid()"
@@ -116,86 +57,85 @@ let enableSocks = false;
  * @returns {Promise<Response>} Response object
  */
 export default {
-  /**
-   * Main Cloudflare Worker fetch handler.
-   * Processes incoming requests and routes them appropriately.
-   * @param {import("@cloudflare/workers-types").Request} request
-   * @param {{UUID: string, PROXYIP: string, SOCKS5: string, SOCKS5_RELAY: string}} env
-   * @param {import("@cloudflare/workers-types").ExecutionContext} _ctx
-   * @returns {Promise<Response>}
-   */
-  async fetch(request, env, _ctx) {
-    try {
-      const { UUID, PROXYIP, SOCKS5, SOCKS5_RELAY } = env;
-      userID = UUID || userID;
-      socks5Address = SOCKS5 || socks5Address;
-      socks5Relay = SOCKS5_RELAY || socks5Relay;
+	/**
+	 * @param {import("@cloudflare/workers-types").Request} request
+	 * @param {{UUID: string, PROXYIP: string, SOCKS5: string, SOCKS5_RELAY: string}} env
+	 * @param {import("@cloudflare/workers-types").ExecutionContext} _ctx
+	 * @returns {Promise<Response>}
+	 */
+	async fetch(request, env, _ctx) {
+		try {
+			const { UUID, PROXYIP, SOCKS5, SOCKS5_RELAY } = env;
+			userID = UUID || userID;
+			socks5Address = SOCKS5 || socks5Address;
+			socks5Relay = SOCKS5_RELAY || socks5Relay;
 
-      // Create URL and extract host.
-      const url = new URL(request.url);
-      const host = request.headers.get('Host');
+			// Handle proxy configuration
+			const proxyConfig = handleProxyConfig(PROXYIP);
+			proxyIP = proxyConfig.ip;
+			proxyPort = proxyConfig.port;
 
-      // Extract forced proxy IP from URL (e.g. /ws/159.223.224.134?ed=2048)
-      const extractedProxyIP = extractProxyIPFromPath(url);
-      if (extractedProxyIP) {
-        forcedProxy = extractedProxyIP;
-        console.log("Forced proxy set to:", forcedProxy);
-      } else {
-        forcedProxy = null;
-      }
+			if (socks5Address) {
+				try {
+					const selectedSocks5 = selectRandomAddress(socks5Address);
+					parsedSocks5Address = socks5AddressParser(selectedSocks5);
+					enableSocks = true;
+				} catch (err) {
+					console.log(err.toString());
+					enableSocks = false;
+				}
+			}
 
-      // Process request path for user IDs and routing.
-      const userIDs = userID.includes(',') ? userID.split(',').map(id => id.trim()) : [userID];
-      const requestedPath = url.pathname.substring(1); // remove leading slash
-      const matchingUserID = userIDs.length === 1
-        ? (requestedPath === userIDs[0] ||
-           requestedPath === `sub/${userIDs[0]}` ||
-           requestedPath === `bestip/${userIDs[0]}` ? userIDs[0] : null)
-        : userIDs.find(id => {
-            const patterns = [id, `sub/${id}`, `bestip/${id}`];
-            return patterns.some(pattern => requestedPath.startsWith(pattern));
-          });
+			const userIDs = userID.includes(',') ? userID.split(',').map(id => id.trim()) : [userID];
+			const url = new URL(request.url);
+			const host = request.headers.get('Host');
+			const requestedPath = url.pathname.substring(1); // Remove leading slash
+			const matchingUserID = userIDs.length === 1 ?
+				(requestedPath === userIDs[0] || 
+				 requestedPath === `sub/${userIDs[0]}` || 
+				 requestedPath === `bestip/${userIDs[0]}` ? userIDs[0] : null) :
+				userIDs.find(id => {
+					const patterns = [id, `sub/${id}`, `bestip/${id}`];
+					return patterns.some(pattern => requestedPath.startsWith(pattern));
+				});
 
-      // Handle non-WebSocket requests.
-      if (request.headers.get('Upgrade') !== 'websocket') {
-        if (url.pathname === '/cf') {
-          return new Response(JSON.stringify(request.cf, null, 4), {
-            status: 200,
-            headers: { "Content-Type": "application/json;charset=utf-8" },
-          });
-        }
+			if (request.headers.get('Upgrade') !== 'websocket') {
+				if (url.pathname === '/cf') {
+					return new Response(JSON.stringify(request.cf, null, 4), {
+						status: 200,
+						headers: { "Content-Type": "application/json;charset=utf-8" },
+					});
+				}
 
-        if (matchingUserID) {
-          if (url.pathname === `/${matchingUserID}` || url.pathname === `/sub/${matchingUserID}`) {
-            const isSubscription = url.pathname.startsWith('/sub/');
-            // For subscription generation, use forcedProxy if available.
-            const proxyAddresses = forcedProxy 
-              ? forcedProxy.split(',').map(addr => addr.trim())
-              : PROXYIP.split(',').map(addr => addr.trim());
-            const content = isSubscription
-              ? GenSub(matchingUserID, host, proxyAddresses)
-              : getConfig(matchingUserID, host, proxyAddresses);
-            return new Response(content, {
-              status: 200,
-              headers: {
-                "Content-Type": isSubscription ? "text/plain;charset=utf-8" : "text/html; charset=utf-8"
-              },
-            });
-          } else if (url.pathname === `/bestip/${matchingUserID}`) {
-            return fetch(`https://bestip.06151953.xyz/auto?host=${host}&uuid=${matchingUserID}&path=/`, { headers: request.headers });
-          }
-        }
-        return handleDefaultPath(url, request);
-      } else {
-        // For WebSocket upgrade requests.
-        return await ProtocolOverWSHandler(request);
-      }
-    } catch (err) {
-      return new Response(err.toString());
-    }
-  },
+				if (matchingUserID) {
+					if (url.pathname === `/${matchingUserID}` || url.pathname === `/sub/${matchingUserID}`) {
+						const isSubscription = url.pathname.startsWith('/sub/');
+						const proxyAddresses = PROXYIP ? PROXYIP.split(',').map(addr => addr.trim()) : proxyIP;
+						const content = isSubscription ?
+							GenSub(matchingUserID, host, proxyAddresses) :
+							getConfig(matchingUserID, host, proxyAddresses);
+
+						return new Response(content, {
+							status: 200,
+							headers: {
+								"Content-Type": isSubscription ?
+									"text/plain;charset=utf-8" :
+									"text/html; charset=utf-8"
+							},
+						});
+					} else if (url.pathname === `/bestip/${matchingUserID}`) {
+						return fetch(`https://bestip.06151953.xyz/auto?host=${host}&uuid=${matchingUserID}&path=/`, { headers: request.headers });
+					}
+				}
+				return handleDefaultPath(url, request);
+			} else {
+				return await ProtocolOverWSHandler(request);
+			}
+		} catch (err) {
+			return new Response(err.toString());
+		}
+	},
 };
-
 
 /**
  * Handles default path requests when no specific route matches.
@@ -545,61 +485,109 @@ async function ProtocolOverWSHandler(request) {
 		webSocket: client,
 	});
 }
+function isValidIP(ip) {
+  // Simple IPv4 validation – adjust if you need IPv6 support
+  return /^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$/.test(ip);
+}
 
+// (2) Extract proxy IP from URL path and revert path as per your example
+function extractProxyAndRevertPath(url, cfg) {
+  const pathParts = url.pathname.split('/').filter(Boolean);
+  if (pathParts.length === 2 && isValidIP(pathParts[1])) {
+    cfg.PROXY = pathParts[1];
+    // Revert path to contain only the service identifier (e.g. '/ws')
+    url.pathname = `/${pathParts[0]}`;
+    return true;
+  }
+  return false;
+}
+async function main(request, env, ctx) {
+  const url = new URL(request.url);
+
+  // Load settings (your existing logic)
+  const cfg = load_settings(env, SETTINGS);
+
+  // Extract proxy IP from URL path if provided
+  if (extractProxyAndRevertPath(url, cfg)) {
+    const log = new Logger(cfg.LOG_LEVEL, cfg.TIME_ZONE);
+    log.info(`Using proxy IP from URL path: ${cfg.PROXY}`);
+  }
+
+  // (Keep the rest of your main function unchanged, including handling non-WebSocket vs. WebSocket requests)
+  // ...
+  // Example:
+  if (request.headers.get('Upgrade') !== 'websocket') {
+    return handleDefaultPath(url, request);
+  } else {
+    return await ProtocolOverWSHandler(request);
+  }
+}
 /**
- * Modified HandleTCPOutBound that uses our forced proxy if set.
- * This function establishes an outbound TCP connection for the proxy.
- *
- * @param {Socket} remoteSocket - Object to store the remote socket.
- * @param {string} addressType - Type of address (IPv4/IPv6).
- * @param {string} addressRemote - Remote server address.
- * @param {number} portRemote - Remote server port.
- * @param {Uint8Array} rawClientData - Initial data from client.
- * @param {WebSocket} webSocket - WebSocket connection.
- * @param {Uint8Array} protocolResponseHeader - Protocol response header.
- * @param {Function} log - Logging function.
+ * Handles outbound TCP connections for the proxy.
+ * Establishes connection to remote server and manages data flow.
+ * @param {Socket} remoteSocket - Remote socket connection
+ * @param {string} addressType - Type of address (IPv4/IPv6)
+ * @param {string} addressRemote - Remote server address
+ * @param {number} portRemote - Remote server port
+ * @param {Uint8Array} rawClientData - Raw data from client
+ * @param {WebSocket} webSocket - WebSocket connection
+ * @param {Uint8Array} protocolResponseHeader - Protocol response header
+ * @param {Function} log - Logging function
  */
 async function HandleTCPOutBound(remoteSocket, addressType, addressRemote, portRemote, rawClientData, webSocket, protocolResponseHeader, log) {
+  // Inner function to open the TCP connection and write initial data.
   async function connectAndWrite(address, port, socks = false) {
     let tcpSocket;
-    // If forcedProxy is set, always use it.
-    if (forcedProxy && isValidIP(forcedProxy)) {
-      tcpSocket = await connect_remote(log, address, port, forcedProxy);
-    } else if (socks5Relay) {
+    if (socks5Relay) {
       tcpSocket = await socks5Connect(addressType, address, port, log);
     } else {
       tcpSocket = socks ? await socks5Connect(addressType, address, port, log)
-                        : connect({ hostname: address, port: port });
+                         : connect({ hostname: address, port: port });
     }
     remoteSocket.value = tcpSocket;
     log(`Connected to ${address}:${port}`);
     const writer = tcpSocket.writable.getWriter();
-    await writer.write(rawClientData);
+    await writer.write(rawClientData); // initial write (e.g. TLS client hello)
     writer.releaseLock();
     return tcpSocket;
   }
 
-  let tcpSocket = await connectAndWrite(addressRemote, portRemote);
-  RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log);
-
+  // Retry function: if connection via proxy fails, try direct.
   async function retry() {
-    let tcpSocket;
-    if (forcedProxy && isValidIP(forcedProxy)) {
-      tcpSocket = await connectAndWrite(addressRemote, portRemote);
-    } else if (enableSocks) {
-      tcpSocket = await connectAndWrite(addressRemote, portRemote, true);
-    } else {
-      tcpSocket = await connectAndWrite(proxyIP || addressRemote, proxyPort || portRemote, false);
-    }
-    tcpSocket.closed.catch(error => {
+    // Fallback to direct connection:
+    let fallbackSocket = await connectAndWrite(addressRemote, portRemote);
+    fallbackSocket.closed.catch(error => {
       console.log('Retry tcpSocket closed error', error);
     }).finally(() => {
       safeCloseWebSocket(webSocket);
     });
-    RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, null, log);
+    RemoteSocketToWS(fallbackSocket, webSocket, protocolResponseHeader, null, log);
   }
-}
 
+  // -----------------------------
+  // Routing Logic
+  // -----------------------------
+  // Decide whether to use the proxy IP (if provided) or bypass for IP-based destinations.
+  let targetAddress, targetPort;
+  if (isValidIP(addressRemote)) {
+    // If the destination is an IP, bypass the proxy.
+    targetAddress = addressRemote;
+    targetPort = portRemote;
+  } else if (cfg && cfg.PROXY) {
+    // If a proxy IP was extracted (and destination is a hostname), use it.
+    targetAddress = cfg.PROXY;
+    // Assume proxyPort was determined earlier (via handleProxyConfig or similar)
+    targetPort = proxyPort;
+  } else {
+    // Fallback: no proxy specified, connect directly.
+    targetAddress = addressRemote;
+    targetPort = portRemote;
+  }
+
+  // Try to connect using the determined targetAddress and targetPort.
+  let tcpSocket = await connectAndWrite(targetAddress, targetPort);
+  RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log);
+}
 
 /**
  * Creates a readable stream from WebSocket server.
