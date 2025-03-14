@@ -110,6 +110,8 @@ export default {
 			const proxyConfig = handleProxyConfig(effectiveProxyIP);
 			let proxyIP_final = proxyConfig.ip;
 			let proxyPort = proxyConfig.port;
+			// Update global proxyIP so that WebSocket and retry logic use the extracted IP
+			proxyIP = proxyIP_final;
 
 			// Process the request path for user IDs and routing
 			const userIDs = userID.includes(',') ? userID.split(',').map(id => id.trim()) : [userID];
@@ -135,7 +137,7 @@ export default {
 				if (matchingUserID) {
 					if (url.pathname === `/${matchingUserID}` || url.pathname === `/sub/${matchingUserID}`) {
 						const isSubscription = url.pathname.startsWith('/sub/');
-						// Use the effectiveProxyIP here if available
+						// Use effectiveProxyIP for subscription generation
 						const proxyAddresses = effectiveProxyIP
 							? effectiveProxyIP.split(',').map(addr => addr.trim())
 							: proxyIP_final;
