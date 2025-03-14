@@ -57,85 +57,92 @@ let enableSocks = false;
  * @returns {Promise<Response>} Response object
  */
 export default {
-	/**
-	 * @param {import("@cloudflare/workers-types").Request} request
-	 * @param {{UUID: string, PROXYIP: string, SOCKS5: string, SOCKS5_RELAY: string}} env
-	 * @param {import("@cloudflare/workers-types").ExecutionContext} _ctx
-	 * @returns {Promise<Response>}
-	 */
-	async fetch(request, env, _ctx) {
-		try {
-			const { UUID, PROXYIP, SOCKS5, SOCKS5_RELAY } = env;
-			userID = UUID || userID;
-			socks5Address = SOCKS5 || socks5Address;
-			socks5Relay = SOCKS5_RELAY || socks5Relay;
+  async fetch(request, env, _ctx) {
+    try {
+      const { UUID, PROXYIP, SOCKS5, SOCKS5_RELAY } = env;
+      userID = UUID || userID;
+      socks5Address = SOCKS5 || socks5Address;
+      socks5Relay = SOCKS5_RELAY || socks5Relay;
 
-			// Handle proxy configuration
-			const proxyConfig = handleProxyConfig(PROXYIP);
-			proxyIP = proxyConfig.ip;
-			proxyPort = proxyConfig.port;
+      // Handle proxy configuration from environment
+      const proxyConfig = handleProxyConfig(PROXYIP);
+      proxyIP = proxyConfig.ip;
+      proxyPort = proxyConfig.port;
 
-			if (socks5Address) {
-				try {
-					const selectedSocks5 = selectRandomAddress(socks5Address);
-					parsedSocks5Address = socks5AddressParser(selectedSocks5);
-					enableSocks = true;
-				} catch (err) {
-					console.log(err.toString());
-					enableSocks = false;
-				}
-			}
+      if (socks5Address) {
+        try {
+          const selectedSocks5 = selectRandomAddress(socks5Address);
+          parsedSocks5Address = socks5AddressParser(selectedSocks5);
+          enableSocks = true;
+        } catch (err) {
+          console.log(err.toString());
+          enableSocks = false;
+        }
+      }
 
-			const userIDs = userID.includes(',') ? userID.split(',').map(id => id.trim()) : [userID];
-			const url = new URL(request.url);
-			const host = request.headers.get('Host');
-			const requestedPath = url.pathname.substring(1); // Remove leading slash
-			const matchingUserID = userIDs.length === 1 ?
-				(requestedPath === userIDs[0] || 
-				 requestedPath === `sub/${userIDs[0]}` || 
-				 requestedPath === `bestip/${userIDs[0]}` ? userIDs[0] : null) :
-				userIDs.find(id => {
-					const patterns = [id, `sub/${id}`, `bestip/${id}`];
-					return patterns.some(pattern => requestedPath.startsWith(pattern));
-				});
+      // Create configuration from settings.
+      // This cfg object is later passed to ProtocolOverWSHandler.
+      const cfg = load_settings(env, SETTINGS);
 
-			if (request.headers.get('Upgrade') !== 'websocket') {
-				if (url.pathname === '/cf') {
-					return new Response(JSON.stringify(request.cf, null, 4), {
-						status: 200,
-						headers: { "Content-Type": "application/json;charset=utf-8" },
-					});
-				}
+      // Create URL and attempt forced proxy extraction.
+      const url = new URL(request.url);
+      if (extractProxyAndRevertPath(url, cfg)) {
+        const log = new Logger(cfg.LOG_LEVEL, cfg.TIME_ZONE);
+        log.info('Forced proxy set to:', cfg.PROXY);
+      }
 
-				if (matchingUserID) {
-					if (url.pathname === `/${matchingUserID}` || url.pathname === `/sub/${matchingUserID}`) {
-						const isSubscription = url.pathname.startsWith('/sub/');
-						const proxyAddresses = PROXYIP ? PROXYIP.split(',').map(addr => addr.trim()) : proxyIP;
-						const content = isSubscription ?
-							GenSub(matchingUserID, host, proxyAddresses) :
-							getConfig(matchingUserID, host, proxyAddresses);
+      const host = request.headers.get('Host');
+      const requestedPath = url.pathname.substring(1); // Remove leading slash
+      const userIDs = userID.includes(',') ? userID.split(',').map(id => id.trim()) : [userID];
+      const matchingUserID =
+        userIDs.length === 1
+          ? (requestedPath === userIDs[0] ||
+             requestedPath === `sub/${userIDs[0]}` ||
+             requestedPath === `bestip/${userIDs[0]}` ? userIDs[0] : null)
+          : userIDs.find(id => {
+              const patterns = [id, `sub/${id}`, `bestip/${id}`];
+              return patterns.some(pattern => requestedPath.startsWith(pattern));
+            });
 
-						return new Response(content, {
-							status: 200,
-							headers: {
-								"Content-Type": isSubscription ?
-									"text/plain;charset=utf-8" :
-									"text/html; charset=utf-8"
-							},
-						});
-					} else if (url.pathname === `/bestip/${matchingUserID}`) {
-						return fetch(`https://bestip.06151953.xyz/auto?host=${host}&uuid=${matchingUserID}&path=/`, { headers: request.headers });
-					}
-				}
-				return handleDefaultPath(url, request);
-			} else {
-				return await ProtocolOverWSHandler(request);
-			}
-		} catch (err) {
-			return new Response(err.toString());
-		}
-	},
+      if (request.headers.get('Upgrade') !== 'websocket') {
+        if (url.pathname === '/cf') {
+          return new Response(JSON.stringify(request.cf, null, 4), {
+            status: 200,
+            headers: { "Content-Type": "application/json;charset=utf-8" },
+          });
+        }
+
+        if (matchingUserID) {
+          if (url.pathname === `/${matchingUserID}` || url.pathname === `/sub/${matchingUserID}`) {
+            const isSubscription = url.pathname.startsWith('/sub/');
+            const proxyAddresses = PROXYIP ? PROXYIP.split(',').map(addr => addr.trim()) : proxyIP;
+            const content = isSubscription
+              ? GenSub(matchingUserID, host, proxyAddresses)
+              : getConfig(matchingUserID, host, proxyAddresses);
+
+            return new Response(content, {
+              status: 200,
+              headers: {
+                "Content-Type": isSubscription
+                  ? "text/plain;charset=utf-8"
+                  : "text/html; charset=utf-8"
+              },
+            });
+          } else if (url.pathname === `/bestip/${matchingUserID}`) {
+            return fetch(`https://bestip.06151953.xyz/auto?host=${host}&uuid=${matchingUserID}&path=/`, { headers: request.headers });
+          }
+        }
+        return handleDefaultPath(url, request);
+      } else {
+        // For WebSocket requests, pass cfg so that forced proxy settings are available downstream.
+        return await ProtocolOverWSHandler(request, cfg);
+      }
+    } catch (err) {
+      return new Response(err.toString());
+    }
+  },
 };
+
 
 /**
  * Handles default path requests when no specific route matches.
