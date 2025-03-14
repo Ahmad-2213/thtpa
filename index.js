@@ -5,7 +5,31 @@ import { connect } from 'cloudflare:sockets';
 // ======================================
 // Configuration
 // ======================================
+/**
+ * Checks if a string is a valid IPv4 address.
+ * @param {string} ip
+ * @returns {boolean}
+ */
+function isValidIP(ip) {
+  return /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.|$)){4}$/.test(ip);
+}
 
+/**
+ * Extracts a proxy IP from the URL pathname if it exists.
+ * If the pathname has two segments and the second is a valid IP,
+ * it removes the IP from the path and returns it.
+ * @param {URL} url
+ * @returns {string|null} The extracted IP or null if not found.
+ */
+function extractProxyIPFromPath(url) {
+  const parts = url.pathname.split('/').filter(Boolean);
+  if (parts.length === 2 && isValidIP(parts[1])) {
+    // Remove the IP segment from the pathname
+    url.pathname = '/' + parts[0];
+    return parts[1];
+  }
+  return null;
+}
 /**
  * User configuration and settings
  * Generate UUID: [Windows] Press "Win + R", input cmd and run: Powershell -NoExit -Command "[guid]::NewGuid()"
