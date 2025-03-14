@@ -401,12 +401,13 @@ async function ProtocolOverWSHandler(request, cfg) {
   const webSocketPair = new WebSocketPair();
   const [client, webSocket] = Object.values(webSocketPair);
   webSocket.accept();
+
   const log = (info, event) => { console.log(`[${info}]`, event || ''); };
   const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
   const readableWebSocketStream = MakeReadableWebSocketStream(webSocket, earlyDataHeader, log);
-  /** @type {{ value: import(\"@cloudflare/workers-types\").Socket | null}} */
   let remoteSocketWrapper = { value: null };
   let isDns = false;
+
   readableWebSocketStream.pipeTo(new WritableStream({
     async write(chunk, controller) {
       if (isDns) {
@@ -418,7 +419,7 @@ async function ProtocolOverWSHandler(request, cfg) {
         writer.releaseLock();
         return;
       }
-      // Process protocol header as usual
+      // Process protocol header (your existing logic)
       const {
         hasError,
         message,
@@ -427,11 +428,9 @@ async function ProtocolOverWSHandler(request, cfg) {
         addressRemote = '',
         rawDataIndex,
         ProtocolVersion = new Uint8Array([0, 0]),
-        isUDP
+        isUDP,
       } = ProcessProtocolHeader(chunk, userID);
-      if (hasError) {
-        throw new Error(message);
-      }
+      if (hasError) { throw new Error(message); }
       if (isUDP) {
         if (portRemote === 53) { isDns = true; } 
         else { throw new Error('UDP proxy is only enabled for DNS (port 53)'); }
@@ -439,7 +438,7 @@ async function ProtocolOverWSHandler(request, cfg) {
       }
       const ProtocolResponseHeader = new Uint8Array([ProtocolVersion[0], 0]);
       const rawClientData = chunk.slice(rawDataIndex);
-      // Pass cfg (which may contain forced proxy info) to the outbound handler
+      // Pass cfg to outbound handler
       HandleTCPOutBound(remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, ProtocolResponseHeader, log, cfg);
     },
     close() { log('readableWebSocketStream closed'); },
@@ -450,38 +449,38 @@ async function ProtocolOverWSHandler(request, cfg) {
   return new Response(null, { status: 101, webSocket: client });
 }
 
+
 function isValidIP(ip) {
-  // Simple IPv4 validation – adjust if you need IPv6 support
-  return /^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$/.test(ip);
+  // Simple IPv4 validation; extend if needed.
+  return /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ip);
 }
 
-// (2) Extract proxy IP from URL path and revert path as per your example
 function extractProxyAndRevertPath(url, cfg) {
   const pathParts = url.pathname.split('/').filter(Boolean);
   if (pathParts.length === 2 && isValidIP(pathParts[1])) {
-    cfg.PROXY = pathParts[1];
-    // Revert path to contain only the service identifier (e.g. '/ws')
-    url.pathname = `/${pathParts[0]}`;
+    cfg.PROXY = pathParts[1]; // forced proxy IP extracted from URL
+    url.pathname = `/${pathParts[0]}`; // revert URL path to original service path
     return true;
   }
   return false;
 }
+
+// --- Main Handler ---
 async function main(request, env, ctx) {
   const url = new URL(request.url);
-  // Load settings (your original load_settings logic)
   const cfg = load_settings(env, SETTINGS);
-  
-  // Try to extract a forced proxy IP from URL path (e.g. "/ws/159.223.224.134?ed=2048")
+
+  // Extract forced proxy IP from URL (e.g. "/ws/159.223.224.134?ed=2048")
   if (extractProxyAndRevertPath(url, cfg)) {
     const log = new Logger(cfg.LOG_LEVEL, cfg.TIME_ZONE);
-    log.info(`Forced proxy set to:`, cfg.PROXY);
+    log.info('Forced proxy set to:', cfg.PROXY);
   }
-  
-  // (Existing logic to choose between WebSocket vs. HTTP paths)
+
+  // Continue with your routing logic
   if (request.headers.get('Upgrade') !== 'websocket') {
     return handleDefaultPath(url, request);
   } else {
-    // Pass cfg.PROXY and (if available) proxyPort to the protocol handler
+    // Pass cfg to ProtocolOverWSHandler so that forced proxy settings are available downstream.
     return await ProtocolOverWSHandler(request, cfg);
   }
 }
@@ -498,25 +497,22 @@ async function main(request, env, ctx) {
  * @param {Function} log - Logging function
  */
 async function HandleTCPOutBound(remoteSocket, addressType, addressRemote, portRemote, rawClientData, webSocket, protocolResponseHeader, log, cfg) {
-  // Inner function to perform connection and initial write.
   async function connectAndWrite(address, port, useSocks = false) {
     let tcpSocket;
     if (socks5Relay) {
       tcpSocket = await socks5Connect(addressType, address, port, log);
     } else {
-      tcpSocket = useSocks 
-        ? await socks5Connect(addressType, address, port, log)
-        : connect({ hostname: address, port: port });
+      tcpSocket = useSocks ? await socks5Connect(addressType, address, port, log)
+                           : connect({ hostname: address, port: port });
     }
     remoteSocket.value = tcpSocket;
     log(`Connected to ${address}:${port}`);
     const writer = tcpSocket.writable.getWriter();
-    await writer.write(rawClientData);  // write initial data (e.g. TLS ClientHello)
+    await writer.write(rawClientData);
     writer.releaseLock();
     return tcpSocket;
   }
-
-  // Retry function: if first connection fails, fall back to direct connection.
+  
   async function retry() {
     let fallbackSocket = await connectAndWrite(addressRemote, portRemote);
     fallbackSocket.closed.catch(error => {
@@ -526,28 +522,22 @@ async function HandleTCPOutBound(remoteSocket, addressType, addressRemote, portR
     });
     RemoteSocketToWS(fallbackSocket, webSocket, protocolResponseHeader, null, log);
   }
-
-  // ----- Routing decision: bypass forced proxy for IP–based destinations -----
-  // If the destination address (from the protocol header) is an IP, connect directly.
-  // Otherwise, if a forced proxy was set (from URL path extraction) use that.
+  
   let targetAddress, targetPort;
-  if (isValidIP(addressRemote)) {
-    targetAddress = addressRemote;
-    targetPort = portRemote;
-  } else if (cfg && cfg.PROXY) {
+  // If the destination is not an IP and forced proxy is set, route via forced proxy.
+  if (!isValidIP(addressRemote) && cfg && cfg.PROXY) {
     targetAddress = cfg.PROXY;
-    // Determine proxy port: either extracted from cfg.PROXY (if it includes a colon) or default to 443.
     targetPort = (cfg.PROXY.indexOf(':') !== -1) ? cfg.PROXY.split(':')[1] : 443;
+    log(`Routing via forced proxy: ${targetAddress}:${targetPort}`);
   } else {
     targetAddress = addressRemote;
     targetPort = portRemote;
   }
-
-  // Attempt connection using the selected target
+  
   let tcpSocket = await connectAndWrite(targetAddress, targetPort);
-  // If connection stalls or fails to produce incoming data, retry with direct connection.
   RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log);
 }
+
 
 /**
  * Creates a readable stream from WebSocket server.
