@@ -397,94 +397,59 @@ async function handleDefaultPath(url, request) {
  * @param {import("@cloudflare/workers-types").Request} request - The incoming request object
  * @returns {Promise<Response>} WebSocket response
  */
-async function ProtocolOverWSHandler(request) {
-
-	/** @type {import("@cloudflare/workers-types").WebSocket[]} */
-	// @ts-ignore
-	const webSocketPair = new WebSocketPair();
-	const [client, webSocket] = Object.values(webSocketPair);
-
-	webSocket.accept();
-
-	let address = '';
-	let portWithRandomLog = '';
-	const log = (/** @type {string} */ info, /** @type {string | undefined} */ event) => {
-		console.log(`[${address}:${portWithRandomLog}] ${info}`, event || '');
-	};
-	const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
-
-	const readableWebSocketStream = MakeReadableWebSocketStream(webSocket, earlyDataHeader, log);
-
-	/** @type {{ value: import("@cloudflare/workers-types").Socket | null}}*/
-	let remoteSocketWapper = {
-		value: null,
-	};
-	let isDns = false;
-
-	// ws --> remote
-	readableWebSocketStream.pipeTo(new WritableStream({
-		async write(chunk, controller) {
-			if (isDns) {
-				return await handleDNSQuery(chunk, webSocket, null, log);
-			}
-			if (remoteSocketWapper.value) {
-				const writer = remoteSocketWapper.value.writable.getWriter()
-				await writer.write(chunk);
-				writer.releaseLock();
-				return;
-			}
-
-			const {
-				hasError,
-				message,
-				addressType,
-				portRemote = 443,
-				addressRemote = '',
-				rawDataIndex,
-				ProtocolVersion = new Uint8Array([0, 0]),
-				isUDP,
-			} = ProcessProtocolHeader(chunk, userID);
-			address = addressRemote;
-			portWithRandomLog = `${portRemote}--${Math.random()} ${isUDP ? 'udp ' : 'tcp '
-				} `;
-			if (hasError) {
-				// controller.error(message);
-				throw new Error(message); // cf seems has bug, controller.error will not end stream
-			}
-			// Handle UDP connections for DNS (port 53) only
-			if (isUDP) {
-				if (portRemote === 53) {
-					isDns = true;
-				} else {
-					throw new Error('UDP proxy is only enabled for DNS (port 53)');
-				}
-				return; // Early return after setting isDns or throwing error
-			}
-			// ["version", "附加信息长度 N"]
-			const ProtocolResponseHeader = new Uint8Array([ProtocolVersion[0], 0]);
-			const rawClientData = chunk.slice(rawDataIndex);
-
-			if (isDns) {
-				return handleDNSQuery(rawClientData, webSocket, ProtocolResponseHeader, log);
-			}
-			HandleTCPOutBound(remoteSocketWapper, addressType, addressRemote, portRemote, rawClientData, webSocket, ProtocolResponseHeader, log);
-		},
-		close() {
-			log(`readableWebSocketStream is close`);
-		},
-		abort(reason) {
-			log(`readableWebSocketStream is abort`, JSON.stringify(reason));
-		},
-	})).catch((err) => {
-		log('readableWebSocketStream pipeTo error', err);
-	});
-
-	return new Response(null, {
-		status: 101,
-		// @ts-ignore
-		webSocket: client,
-	});
+async function ProtocolOverWSHandler(request, cfg) {
+  const webSocketPair = new WebSocketPair();
+  const [client, webSocket] = Object.values(webSocketPair);
+  webSocket.accept();
+  const log = (info, event) => { console.log(`[${info}]`, event || ''); };
+  const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
+  const readableWebSocketStream = MakeReadableWebSocketStream(webSocket, earlyDataHeader, log);
+  /** @type {{ value: import(\"@cloudflare/workers-types\").Socket | null}} */
+  let remoteSocketWrapper = { value: null };
+  let isDns = false;
+  readableWebSocketStream.pipeTo(new WritableStream({
+    async write(chunk, controller) {
+      if (isDns) {
+        return await handleDNSQuery(chunk, webSocket, null, log);
+      }
+      if (remoteSocketWrapper.value) {
+        const writer = remoteSocketWrapper.value.writable.getWriter();
+        await writer.write(chunk);
+        writer.releaseLock();
+        return;
+      }
+      // Process protocol header as usual
+      const {
+        hasError,
+        message,
+        addressType,
+        portRemote = 443,
+        addressRemote = '',
+        rawDataIndex,
+        ProtocolVersion = new Uint8Array([0, 0]),
+        isUDP
+      } = ProcessProtocolHeader(chunk, userID);
+      if (hasError) {
+        throw new Error(message);
+      }
+      if (isUDP) {
+        if (portRemote === 53) { isDns = true; } 
+        else { throw new Error('UDP proxy is only enabled for DNS (port 53)'); }
+        return;
+      }
+      const ProtocolResponseHeader = new Uint8Array([ProtocolVersion[0], 0]);
+      const rawClientData = chunk.slice(rawDataIndex);
+      // Pass cfg (which may contain forced proxy info) to the outbound handler
+      HandleTCPOutBound(remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, ProtocolResponseHeader, log, cfg);
+    },
+    close() { log('readableWebSocketStream closed'); },
+    abort(reason) { log('readableWebSocketStream aborted', JSON.stringify(reason)); }
+  })).catch((err) => {
+    log('readableWebSocketStream pipeTo error', err);
+  });
+  return new Response(null, { status: 101, webSocket: client });
 }
+
 function isValidIP(ip) {
   // Simple IPv4 validation – adjust if you need IPv6 support
   return /^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$/.test(ip);
@@ -503,23 +468,21 @@ function extractProxyAndRevertPath(url, cfg) {
 }
 async function main(request, env, ctx) {
   const url = new URL(request.url);
-
-  // Load settings (your existing logic)
+  // Load settings (your original load_settings logic)
   const cfg = load_settings(env, SETTINGS);
-
-  // Extract proxy IP from URL path if provided
+  
+  // Try to extract a forced proxy IP from URL path (e.g. "/ws/159.223.224.134?ed=2048")
   if (extractProxyAndRevertPath(url, cfg)) {
     const log = new Logger(cfg.LOG_LEVEL, cfg.TIME_ZONE);
-    log.info(`Using proxy IP from URL path: ${cfg.PROXY}`);
+    log.info(`Forced proxy set to:`, cfg.PROXY);
   }
-
-  // (Keep the rest of your main function unchanged, including handling non-WebSocket vs. WebSocket requests)
-  // ...
-  // Example:
+  
+  // (Existing logic to choose between WebSocket vs. HTTP paths)
   if (request.headers.get('Upgrade') !== 'websocket') {
     return handleDefaultPath(url, request);
   } else {
-    return await ProtocolOverWSHandler(request);
+    // Pass cfg.PROXY and (if available) proxyPort to the protocol handler
+    return await ProtocolOverWSHandler(request, cfg);
   }
 }
 /**
@@ -534,58 +497,55 @@ async function main(request, env, ctx) {
  * @param {Uint8Array} protocolResponseHeader - Protocol response header
  * @param {Function} log - Logging function
  */
-async function HandleTCPOutBound(remoteSocket, addressType, addressRemote, portRemote, rawClientData, webSocket, protocolResponseHeader, log) {
-  // Inner function to open the TCP connection and write initial data.
-  async function connectAndWrite(address, port, socks = false) {
+async function HandleTCPOutBound(remoteSocket, addressType, addressRemote, portRemote, rawClientData, webSocket, protocolResponseHeader, log, cfg) {
+  // Inner function to perform connection and initial write.
+  async function connectAndWrite(address, port, useSocks = false) {
     let tcpSocket;
     if (socks5Relay) {
       tcpSocket = await socks5Connect(addressType, address, port, log);
     } else {
-      tcpSocket = socks ? await socks5Connect(addressType, address, port, log)
-                         : connect({ hostname: address, port: port });
+      tcpSocket = useSocks 
+        ? await socks5Connect(addressType, address, port, log)
+        : connect({ hostname: address, port: port });
     }
     remoteSocket.value = tcpSocket;
     log(`Connected to ${address}:${port}`);
     const writer = tcpSocket.writable.getWriter();
-    await writer.write(rawClientData); // initial write (e.g. TLS client hello)
+    await writer.write(rawClientData);  // write initial data (e.g. TLS ClientHello)
     writer.releaseLock();
     return tcpSocket;
   }
 
-  // Retry function: if connection via proxy fails, try direct.
+  // Retry function: if first connection fails, fall back to direct connection.
   async function retry() {
-    // Fallback to direct connection:
     let fallbackSocket = await connectAndWrite(addressRemote, portRemote);
     fallbackSocket.closed.catch(error => {
-      console.log('Retry tcpSocket closed error', error);
+      console.log('retry tcpSocket closed error', error);
     }).finally(() => {
       safeCloseWebSocket(webSocket);
     });
     RemoteSocketToWS(fallbackSocket, webSocket, protocolResponseHeader, null, log);
   }
 
-  // -----------------------------
-  // Routing Logic
-  // -----------------------------
-  // Decide whether to use the proxy IP (if provided) or bypass for IP-based destinations.
+  // ----- Routing decision: bypass forced proxy for IP–based destinations -----
+  // If the destination address (from the protocol header) is an IP, connect directly.
+  // Otherwise, if a forced proxy was set (from URL path extraction) use that.
   let targetAddress, targetPort;
   if (isValidIP(addressRemote)) {
-    // If the destination is an IP, bypass the proxy.
     targetAddress = addressRemote;
     targetPort = portRemote;
   } else if (cfg && cfg.PROXY) {
-    // If a proxy IP was extracted (and destination is a hostname), use it.
     targetAddress = cfg.PROXY;
-    // Assume proxyPort was determined earlier (via handleProxyConfig or similar)
-    targetPort = proxyPort;
+    // Determine proxy port: either extracted from cfg.PROXY (if it includes a colon) or default to 443.
+    targetPort = (cfg.PROXY.indexOf(':') !== -1) ? cfg.PROXY.split(':')[1] : 443;
   } else {
-    // Fallback: no proxy specified, connect directly.
     targetAddress = addressRemote;
     targetPort = portRemote;
   }
 
-  // Try to connect using the determined targetAddress and targetPort.
+  // Attempt connection using the selected target
   let tcpSocket = await connectAndWrite(targetAddress, targetPort);
+  // If connection stalls or fails to produce incoming data, retry with direct connection.
   RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log);
 }
 
