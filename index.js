@@ -64,7 +64,7 @@ export default {
       socks5Address = SOCKS5 || socks5Address;
       socks5Relay = SOCKS5_RELAY || socks5Relay;
 
-      // Handle proxy configuration from environment
+      // Environment-based proxy configuration (used if no forced proxy is provided)
       const proxyConfig = handleProxyConfig(PROXYIP);
       proxyIP = proxyConfig.ip;
       proxyPort = proxyConfig.port;
@@ -80,30 +80,17 @@ export default {
         }
       }
 
-      // Create configuration from settings.
-      // This cfg object is later passed to ProtocolOverWSHandler.
+      // Create configuration from settings. Make sure load_settings() does not override forced proxy.
       const cfg = load_settings(env, SETTINGS);
 
-      // Create URL and attempt forced proxy extraction.
+      // Parse URL and extract forced proxy from the path, if present.
       const url = new URL(request.url);
       if (extractProxyAndRevertPath(url, cfg)) {
         const log = new Logger(cfg.LOG_LEVEL, cfg.TIME_ZONE);
-        log.info('Forced proxy set to:', cfg.PROXY);
+        log.info('Forced proxy extracted:', cfg.PROXY);
       }
 
-      const host = request.headers.get('Host');
-      const requestedPath = url.pathname.substring(1); // Remove leading slash
-      const userIDs = userID.includes(',') ? userID.split(',').map(id => id.trim()) : [userID];
-      const matchingUserID =
-        userIDs.length === 1
-          ? (requestedPath === userIDs[0] ||
-             requestedPath === `sub/${userIDs[0]}` ||
-             requestedPath === `bestip/${userIDs[0]}` ? userIDs[0] : null)
-          : userIDs.find(id => {
-              const patterns = [id, `sub/${id}`, `bestip/${id}`];
-              return patterns.some(pattern => requestedPath.startsWith(pattern));
-            });
-
+      // Routing for non-WebSocket requests.
       if (request.headers.get('Upgrade') !== 'websocket') {
         if (url.pathname === '/cf') {
           return new Response(JSON.stringify(request.cf, null, 4), {
@@ -112,6 +99,20 @@ export default {
           });
         }
 
+        // Handle user-specific routes (subscriptions, bestip, etc.)
+        const host = request.headers.get('Host');
+        const requestedPath = url.pathname.substring(1); // Remove leading slash
+        const userIDs = userID.includes(',') ? userID.split(',').map(id => id.trim()) : [userID];
+        const matchingUserID =
+          userIDs.length === 1
+            ? (requestedPath === userIDs[0] ||
+               requestedPath === `sub/${userIDs[0]}` ||
+               requestedPath === `bestip/${userIDs[0]}` ? userIDs[0] : null)
+            : userIDs.find(id => {
+                const patterns = [id, `sub/${id}`, `bestip/${id}`];
+                return patterns.some(pattern => requestedPath.startsWith(pattern));
+              });
+
         if (matchingUserID) {
           if (url.pathname === `/${matchingUserID}` || url.pathname === `/sub/${matchingUserID}`) {
             const isSubscription = url.pathname.startsWith('/sub/');
@@ -119,7 +120,6 @@ export default {
             const content = isSubscription
               ? GenSub(matchingUserID, host, proxyAddresses)
               : getConfig(matchingUserID, host, proxyAddresses);
-
             return new Response(content, {
               status: 200,
               headers: {
@@ -134,7 +134,7 @@ export default {
         }
         return handleDefaultPath(url, request);
       } else {
-        // For WebSocket requests, pass cfg so that forced proxy settings are available downstream.
+        // For WebSocket requests, pass the cfg object downstream.
         return await ProtocolOverWSHandler(request, cfg);
       }
     } catch (err) {
@@ -142,6 +142,7 @@ export default {
     }
   },
 };
+
 
 
 /**
