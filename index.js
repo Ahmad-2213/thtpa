@@ -30,7 +30,7 @@ let proxyPort = proxyIP.includes(':') ? proxyIP.split(':')[1] : '443';
  * SOCKS5 proxy configuration
  * Format: 'username:password@host:port' or 'host:port'
  */
-let socks5Address = '176.191.128.203:443';
+let socks5Address = '176.191.128.203:80';
 
 /**
  * SOCKS5 relay mode
