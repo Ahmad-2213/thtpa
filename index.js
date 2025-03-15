@@ -499,49 +499,47 @@ async function ProtocolOverWSHandler(request) {
  * @param {Function} log - Logging function
  */
 
-async function HandleTCPOutBound(remoteSocket, addressType, addressRemote, portRemote, rawClientData, webSocket, protocolResponseHeader, log,) {
-	async function connectAndWrite(address, port, socks = false) {
-		/** @type {import("@cloudflare/workers-types").Socket} */
-		let initialAddress = socks5Relay ? addressRemote : (proxyIP || addressRemote);
-let initialPort = socks5Relay ? portRemote : (proxyIP ? proxyPort : portRemote);
-let tcpSocket = await connectAndWrite(initialAddress, initialPort, false);
-		if (socks5Relay) {
-			tcpSocket = await socks5Connect(addressType, address, port, log)
-		} else {
-			tcpSocket = socks ? await socks5Connect(addressType, address, port, log)
-				: connect({
-					hostname: address,
-					port: port,
-				});
-		}
-		remoteSocket.value = tcpSocket;
-		log(`connected to ${address}:${port}`);
-		const writer = tcpSocket.writable.getWriter();
-		await writer.write(rawClientData); // first write, normal is tls client hello
-		writer.releaseLock();
-		return tcpSocket;
-	}
-
-	// if the cf connect tcp socket have no incoming data, we retry to redirect ip
-	async function retry() {
-    if (enableSocks) {
-        tcpSocket = await connectAndWrite(addressRemote, portRemote, true);
-    } else {
-        tcpSocket = await connectAndWrite(addressRemote, portRemote, false);
+async function HandleTCPOutBound(remoteSocket, addressType, addressRemote, portRemote, rawClientData, webSocket, protocolResponseHeader, log) {
+    async function connectAndWrite(address, port, socks = false) {
+        let tcpSocket;
+        if (socks5Relay) {
+            tcpSocket = await socks5Connect(addressType, address, port, log);
+        } else {
+            tcpSocket = socks ? await socks5Connect(addressType, address, port, log)
+                : connect({
+                    hostname: address,
+                    port: port,
+                });
+        }
+        remoteSocket.value = tcpSocket;
+        log(`connected to ${address}:${port}`);
+        const writer = tcpSocket.writable.getWriter();
+        await writer.write(rawClientData);
+        writer.releaseLock();
+        return tcpSocket;
     }
-    tcpSocket.closed.catch(error => {
-        console.log('retry tcpSocket closed error', error);
-    }).finally(() => {
-        safeCloseWebSocket(webSocket);
-    });
-    RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, null, log);
-}
 
-	let tcpSocket = await connectAndWrite(addressRemote, portRemote);
+    async function retry() {
+        let tcpSocket;
+        if (enableSocks) {
+            tcpSocket = await connectAndWrite(addressRemote, portRemote, true);
+        } else {
+            tcpSocket = await connectAndWrite(addressRemote, portRemote, false);
+        }
+        tcpSocket.closed.catch(error => {
+            console.log('retry tcpSocket closed error', error);
+        }).finally(() => {
+            safeCloseWebSocket(webSocket);
+        });
+        RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, null, log);
+    }
 
-	// when remoteSocket is ready, pass to websocket
-	// remote--> ws
-	RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log);
+    // Initial connection: prioritize proxyIP
+    let initialAddress = socks5Relay ? addressRemote : (proxyIP || addressRemote);
+    let initialPort = socks5Relay ? portRemote : (proxyIP ? proxyPort : portRemote);
+    let tcpSocket = await connectAndWrite(initialAddress, initialPort, false);
+
+    RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, retry, log);
 }
 
 /**
