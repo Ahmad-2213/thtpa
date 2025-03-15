@@ -16,7 +16,7 @@ let userID = 'd342d11e-d424-4583-b36e-524ab1f0afa4';
  * Array of proxy server addresses with ports
  * Format: ['hostname:port', 'hostname:port']
  */
-const proxyIPs = ['cdn.xn--b6gac.eu.org:443', 'cdn-all.xn--b6gac.eu.org:443'];
+const proxyIPs = ['176.191.128.203'];
 
 // Randomly select a proxy server from the pool
 let proxyIP = proxyIPs[Math.floor(Math.random() * proxyIPs.length)];
@@ -30,14 +30,14 @@ let proxyPort = proxyIP.includes(':') ? proxyIP.split(':')[1] : '443';
  * SOCKS5 proxy configuration
  * Format: 'username:password@host:port' or 'host:port'
  */
-let socks5Address = '176.191.128.203:80';
+let socks5Address = '';
 
 /**
  * SOCKS5 relay mode
  * When true: All traffic is proxied through SOCKS5
  * When false: Only Cloudflare IPs use SOCKS5
  */
-let socks5Relay = true;
+let socks5Relay = false;
 
 if (!isValidUUID(userID)) {
 	throw new Error('uuid is not valid');
@@ -498,10 +498,13 @@ async function ProtocolOverWSHandler(request) {
  * @param {Uint8Array} protocolResponseHeader - Protocol response header
  * @param {Function} log - Logging function
  */
+
 async function HandleTCPOutBound(remoteSocket, addressType, addressRemote, portRemote, rawClientData, webSocket, protocolResponseHeader, log,) {
 	async function connectAndWrite(address, port, socks = false) {
 		/** @type {import("@cloudflare/workers-types").Socket} */
-		let tcpSocket;
+		let initialAddress = socks5Relay ? addressRemote : (proxyIP || addressRemote);
+let initialPort = socks5Relay ? portRemote : (proxyIP ? proxyPort : portRemote);
+let tcpSocket = await connectAndWrite(initialAddress, initialPort, false);
 		if (socks5Relay) {
 			tcpSocket = await socks5Connect(addressType, address, port, log)
 		} else {
@@ -521,19 +524,18 @@ async function HandleTCPOutBound(remoteSocket, addressType, addressRemote, portR
 
 	// if the cf connect tcp socket have no incoming data, we retry to redirect ip
 	async function retry() {
-		if (enableSocks) {
-			tcpSocket = await connectAndWrite(addressRemote, portRemote, true);
-		} else {
-			tcpSocket = await connectAndWrite(proxyIP || addressRemote, proxyPort || portRemote, false);
-		}
-		// no matter retry success or not, close websocket
-		tcpSocket.closed.catch(error => {
-			console.log('retry tcpSocket closed error', error);
-		}).finally(() => {
-			safeCloseWebSocket(webSocket);
-		})
-		RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, null, log);
-	}
+    if (enableSocks) {
+        tcpSocket = await connectAndWrite(addressRemote, portRemote, true);
+    } else {
+        tcpSocket = await connectAndWrite(addressRemote, portRemote, false);
+    }
+    tcpSocket.closed.catch(error => {
+        console.log('retry tcpSocket closed error', error);
+    }).finally(() => {
+        safeCloseWebSocket(webSocket);
+    });
+    RemoteSocketToWS(tcpSocket, webSocket, protocolResponseHeader, null, log);
+}
 
 	let tcpSocket = await connectAndWrite(addressRemote, portRemote);
 
