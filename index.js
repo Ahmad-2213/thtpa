@@ -4,8 +4,8 @@ import { connect } from 'cloudflare:sockets'
  * Default settings.
  */
 const SETTINGS = {
-  UUID: '', // vless UUID
-  PROXY: '', // optional proxy hostname or IP
+  UUID: '43e8276e-104b-45d7-9dac-b8a1fc7c2a24', // vless UUID
+  PROXY: '81.95.4.189', // optional proxy hostname or IP
   LOG_LEVEL: 'none', // debug, info, error, none
   TIME_ZONE: '0', // time zone for logs (in hours)
   
