@@ -4,7 +4,7 @@ import { connect } from 'cloudflare:sockets'
  * Default settings.
  */
 const SETTINGS = {
-  UUID: '43e8276e-104b-45d7-9dac-b8a1fc7c2a24', // vless UUID
+  UUID: 'f2ddf2f1-59bb-45b4-b20b-af789dbd903a', // vless UUID
   PROXY: '', // optional proxy hostname or IP
   LOG_LEVEL: 'none', // debug, info, error, none
   TIME_ZONE: '0', // time zone for logs (in hours)
@@ -23,7 +23,7 @@ const SETTINGS = {
 
   // New setting: maximum allowed connection duration in milliseconds.
   // This helps abort requests that might otherwise build up CPU usage on the free plan.
-  MAX_REQUEST_DURATION: '500',
+  MAX_REQUEST_DURATION: '500000',
 };
 
 // Cache for processed configuration
